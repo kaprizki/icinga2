@@ -273,7 +273,8 @@ You can enable the feature using
 
     # icinga2 feature enable elastic
 
-By default it will write to an expected Elasticsearch instance at `127.0.0.1`, port `9200`.
+By default it will write to an expected Elasticsearch instance at `127.0.0.1`, port `9200`. Three types are used:
+`checkresult`, `statechange`, `servicenotification` and `servicenotification`.
 
 More configuration details can be found [here](09-object-types.md#objecttype-elasticwriter).
 
