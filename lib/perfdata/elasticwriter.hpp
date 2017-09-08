@@ -45,29 +45,33 @@ protected:
 	virtual void Stop(bool runtimeRemoved) override;
 
 private:
+	String m_EventPrefix;
 	WorkQueue m_WorkQueue;
 	Timer::Ptr m_FlushTimer;
 	std::vector<String> m_DataBuffer;
 	boost::mutex m_DataBufferMutex;
 
+	void AddCheckResult(const Dictionary::Ptr& fields, const Checkable::Ptr& checkable, const CheckResult::Ptr& cr);
+
 	void StateChangeHandler(const Checkable::Ptr& checkable, const CheckResult::Ptr& cr, StateType type);
 	void StateChangeHandlerInternal(const Checkable::Ptr& checkable, const CheckResult::Ptr& cr, StateType type);
 	void CheckResultHandler(const Checkable::Ptr& checkable, const CheckResult::Ptr& cr);
 	void InternalCheckResultHandler(const Checkable::Ptr& checkable, const CheckResult::Ptr& cr);
-	void NotificationToUserHandler(const Notification::Ptr& notification, const Checkable::Ptr& checkable,
-	    const User::Ptr& user, NotificationType notificationType, const CheckResult::Ptr& cr,
-	    const String& author, const String& commentText, const String& commandName);
-	void NotificationToUserHandlerInternal(const Notification::Ptr& notification, const Checkable::Ptr& checkable,
-	    const User::Ptr& user, NotificationType notification_type, const CheckResult::Ptr& cr,
-	    const String& author, const String& comment_text, const String& command_name);
+	void NotificationSentToAllUsersHandler(const Notification::Ptr& notification,
+	    const Checkable::Ptr& checkable, const std::set<User::Ptr>& users, NotificationType type,
+	    const CheckResult::Ptr& cr, const String& author, const String& text);
+	void NotificationSentToAllUsersHandlerInternal(const Notification::Ptr& notification,
+	    const Checkable::Ptr& checkable, const std::set<User::Ptr>& users, NotificationType type,
+	    const CheckResult::Ptr& cr, const String& author, const String& text);
 
-	void AddToQueue(String type, const Dictionary::Ptr& fields);
+	void Enqueue(String type, const Dictionary::Ptr& fields, double ts);
 
 	Stream::Ptr Connect(void);
 	void AssertOnWorkQueue(void);
 	void ExceptionHandler(boost::exception_ptr exp);
 	void FlushTimeout(void);
 	void Flush(void);
+	void SendRequest(const String& body);
 };
 
 }

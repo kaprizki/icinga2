@@ -77,6 +77,8 @@ void ElasticWriter::Start(bool runtimeCreated)
 {
 	ObjectImpl<ElasticWriter>::Start(runtimeCreated);
 
+	m_EventPrefix = "icinga2.event.";
+
  	Log(LogInformation, "ElasticWriter")
 	    << "'" << GetName() << "' started.";
 
@@ -84,16 +86,15 @@ void ElasticWriter::Start(bool runtimeCreated)
 
 	/* Setup timer for periodically flushing m_DataBuffer */
 	m_FlushTimer = new Timer();
-	//m_FlushTimer->SetInterval(GetFlushInterval());
-	m_FlushTimer->SetInterval(10);
+	m_FlushTimer->SetInterval(GetFlushInterval());
 	m_FlushTimer->OnTimerExpired.connect(boost::bind(&ElasticWriter::FlushTimeout, this));
 	m_FlushTimer->Start();
 	m_FlushTimer->Reschedule(0);
 
 	/* Register for new metrics. */
+	Checkable::OnNewCheckResult.connect(boost::bind(&ElasticWriter::CheckResultHandler, this, _1, _2));
 	Checkable::OnStateChange.connect(boost::bind(&ElasticWriter::StateChangeHandler, this, _1, _2, _3));
-	Service::OnNewCheckResult.connect(boost::bind(&ElasticWriter::CheckResultHandler, this, _1, _2));
-	Checkable::OnNotificationSentToUser.connect(boost::bind(&ElasticWriter::NotificationToUserHandler, this, _1, _2, _3, _4, _5, _6, _7, _8));
+	Checkable::OnNotificationSentToAllUsers.connect(boost::bind(&ElasticWriter::NotificationSentToAllUsersHandler, this, _1, _2, _3, _4, _5, _6, _7));
 }
 
 void ElasticWriter::Stop(bool runtimeRemoved)
@@ -106,44 +107,54 @@ void ElasticWriter::Stop(bool runtimeRemoved)
 	ObjectImpl<ElasticWriter>::Stop(runtimeRemoved);
 }
 
-void ElasticWriter::StateChangeHandler(const Checkable::Ptr& checkable, const CheckResult::Ptr& cr, StateType type)
+void ElasticWriter::AddCheckResult(const Dictionary::Ptr& fields, const Checkable::Ptr& checkable, const CheckResult::Ptr& cr)
 {
-	m_WorkQueue.Enqueue(boost::bind(&ElasticWriter::StateChangeHandlerInternal, this, checkable, cr, type));
-}
+	String prefix = "check_result.";
 
-void ElasticWriter::StateChangeHandlerInternal(const Checkable::Ptr& checkable, const CheckResult::Ptr& cr, StateType type)
-{
-	AssertOnWorkQueue();
+	fields->Set(prefix + "latency", cr->CalculateLatency());
+	fields->Set(prefix + "execution_time", cr->CalculateExecutionTime());
+	fields->Set(prefix + "output", cr->GetOutput());
+	fields->Set(prefix + "check_source", cr->GetCheckSource());
 
-	CONTEXT("Elasticwriter processing state change '" + checkable->GetName() + "'");
+	Array::Ptr perfdata = cr->GetPerformanceData();
 
-	Host::Ptr host;
-	Service::Ptr service;
-	tie(host, service) = GetHostService(checkable);
+	if (perfdata) {
+		ObjectLock olock(perfdata);
+		for (const Value& val : perfdata) {
+			PerfdataValue::Ptr pdv;
 
-	Dictionary::Ptr fields = new Dictionary();
+			if (val.IsObjectType<PerfdataValue>())
+				pdv = val;
+			else {
+				try {
+					pdv = PerfdataValue::Parse(val);
+				} catch (const std::exception&) {
+					Log(LogWarning, "ElasticWriter")
+					    << "Ignoring invalid perfdata value: '" << val << "' for object '"
+					    << checkable->GetName() << "'.";
+				}
+			}
 
-	fields->Set("_state", service ? Service::StateToString(service->GetState()) : Host::StateToString(host->GetState()));
-	fields->Set("_current_check_attempt", checkable->GetCheckAttempt());
-	fields->Set("_max_check_attempts", checkable->GetMaxCheckAttempts());
-	fields->Set("_hostname", host->GetName());
+			String escaped_key = pdv->GetLabel();
+			boost::replace_all(escaped_key, " ", "_");
+			boost::replace_all(escaped_key, ".", "_");
+			boost::replace_all(escaped_key, "\\", "_");
+			boost::algorithm::replace_all(escaped_key, "::", ".");
 
-	if (service) {
-		fields->Set("_service_name", service->GetShortName());
-		fields->Set("_service_state", Service::StateToString(service->GetState()));
-		fields->Set("_last_state", service->GetLastState());
-		fields->Set("_last_hard_state", service->GetLastHardState());
-	} else {
-		fields->Set("_last_state", host->GetLastState());
-		fields->Set("_last_hard_state", host->GetLastHardState());
+			String perfdataPrefix = prefix + "perfdata.";
+
+			fields->Set(perfdataPrefix + escaped_key + ".value", pdv->GetValue());
+
+			if (pdv->GetMin())
+				fields->Set(perfdataPrefix + escaped_key + ".min", pdv->GetMin());
+			if (pdv->GetMax())
+				fields->Set(perfdataPrefix + escaped_key + ".max", pdv->GetMax());
+			if (pdv->GetWarn())
+				fields->Set(perfdataPrefix + escaped_key + ".warn", pdv->GetWarn());
+			if (pdv->GetCrit())
+				fields->Set(perfdataPrefix + escaped_key + ".crit", pdv->GetCrit());
+		}
 	}
-
-	CheckCommand::Ptr commandObj = checkable->GetCheckCommand();
-
-	if (commandObj)
-		fields->Set("_check_command", commandObj->GetName());
-
-	AddToQueue("statechange", fields);
 }
 
 void ElasticWriter::CheckResultHandler(const Checkable::Ptr& checkable, const CheckResult::Ptr& cr)
@@ -164,95 +175,100 @@ void ElasticWriter::InternalCheckResultHandler(const Checkable::Ptr& checkable, 
 	Service::Ptr service;
 	boost::tie(host, service) = GetHostService(checkable);
 
-	Dictionary::Ptr tmpl_fields = new Dictionary();
+	Dictionary::Ptr fields = new Dictionary();
 
 	if (service) {
-		tmpl_fields->Set("_service_name", service->GetShortName());
-		tmpl_fields->Set("_service_state", Service::StateToString(service->GetState()));
-		tmpl_fields->Set("_last_state", service->GetLastState());
-		tmpl_fields->Set("_last_hard_state", service->GetLastHardState());
+		fields->Set("service", service->GetShortName());
+		fields->Set("state", service->GetState());
+		fields->Set("last_state", service->GetLastState());
+		fields->Set("last_hard_state", service->GetLastHardState());
 	} else {
-		tmpl_fields->Set("_last_state", host->GetLastState());
-		tmpl_fields->Set("_last_hard_state", host->GetLastHardState());
+		fields->Set("state", host->GetState());
+		fields->Set("last_state", host->GetLastState());
+		fields->Set("last_hard_state", host->GetLastHardState());
 	}
 
-	tmpl_fields->Set("_hostname", host->GetName());
-	tmpl_fields->Set("_state", service ? Service::StateToString(service->GetState()) : Host::StateToString(host->GetState()));
+	fields->Set("host", host->GetName());
+	fields->Set("state_type", checkable->GetStateType());
 
-	tmpl_fields->Set("_current_check_attempt", checkable->GetCheckAttempt());
-	tmpl_fields->Set("_max_check_attempts", checkable->GetMaxCheckAttempts());
+	fields->Set("current_check_attempt", checkable->GetCheckAttempt());
+	fields->Set("max_check_attempts", checkable->GetMaxCheckAttempts());
 
-	tmpl_fields->Set("_reachable", checkable->IsReachable());
+	fields->Set("reachable", checkable->IsReachable());
 
 	CheckCommand::Ptr commandObj = checkable->GetCheckCommand();
 
 	if (commandObj)
-		tmpl_fields->Set("_check_command", commandObj->GetName());
+		fields->Set("check_command", commandObj->GetName());
 
 	double ts = Utility::GetTime();
 
 	if (cr) {
-		tmpl_fields->Set("_latency", cr->CalculateLatency());
-		tmpl_fields->Set("_execution_time", cr->CalculateExecutionTime());
-		tmpl_fields->Set("short_message", CompatUtility::GetCheckResultOutput(cr));
-		tmpl_fields->Set("full_message", cr->GetOutput());
-		tmpl_fields->Set("_check_source", cr->GetCheckSource());
+		AddCheckResult(fields, checkable, cr);
 		ts = cr->GetExecutionEnd();
-		Array::Ptr perfdata = cr->GetPerformanceData();
-
-		if (perfdata) {
-			ObjectLock olock(perfdata);
-			for (const Value& val : perfdata) {
-				PerfdataValue::Ptr pdv;
-				Dictionary::Ptr fields = tmpl_fields->ShallowClone();
-
-				if (val.IsObjectType<PerfdataValue>())
-					pdv = val;
-				else {
-					try {
-						pdv = PerfdataValue::Parse(val);
-					} catch (const std::exception&) {
-						Log(LogWarning, "ElasticWriter")
-						    << "Ignoring invalid perfdata value: '" << val << "' for object '"
-						    << checkable->GetName() << "'.";
-					}
-				}
-
-				String escaped_key = pdv->GetLabel();
-				boost::replace_all(escaped_key, " ", "_");
-				boost::replace_all(escaped_key, ".", "_");
-				boost::replace_all(escaped_key, "\\", "_");
-				boost::algorithm::replace_all(escaped_key, "::", ".");
-
-				fields->Set("_" + escaped_key, pdv->GetValue());
-
-				if (pdv->GetMin())
-					fields->Set("_" + escaped_key + "_min", pdv->GetMin());
-				if (pdv->GetMax())
-					fields->Set("_" + escaped_key + "_max", pdv->GetMax());
-				if (pdv->GetWarn())
-					fields->Set("_" + escaped_key + "_warn", pdv->GetWarn());
-				if (pdv->GetCrit())
-					fields->Set("_" + escaped_key + "_crit", pdv->GetCrit());
-				AddToQueue("checkresult", fields);
-			}
-		} else {
-			AddToQueue("checkresult", tmpl_fields);
-		}
 	}
+
+	Enqueue("checkresult", fields, ts);
 }
 
-void ElasticWriter::NotificationToUserHandler(const Notification::Ptr& notification, const Checkable::Ptr& checkable,
-    const User::Ptr& user, NotificationType notificationType, CheckResult::Ptr const& cr,
-    const String& author, const String& commentText, const String& commandName)
+void ElasticWriter::StateChangeHandler(const Checkable::Ptr& checkable, const CheckResult::Ptr& cr, StateType type)
 {
-	m_WorkQueue.Enqueue(boost::bind(&ElasticWriter::NotificationToUserHandlerInternal, this,
-	    notification, checkable, user, notificationType, cr, author, commentText, commandName));
+	m_WorkQueue.Enqueue(boost::bind(&ElasticWriter::StateChangeHandlerInternal, this, checkable, cr, type));
 }
 
-void ElasticWriter::NotificationToUserHandlerInternal(const Notification::Ptr& notification, const Checkable::Ptr& checkable,
-    const User::Ptr& user, NotificationType notificationType, CheckResult::Ptr const& cr,
-    const String& author, const String& commentText, const String& commandName)
+void ElasticWriter::StateChangeHandlerInternal(const Checkable::Ptr& checkable, const CheckResult::Ptr& cr, StateType type)
+{
+	AssertOnWorkQueue();
+
+	CONTEXT("Elasticwriter processing state change '" + checkable->GetName() + "'");
+
+	Host::Ptr host;
+	Service::Ptr service;
+	tie(host, service) = GetHostService(checkable);
+
+	Dictionary::Ptr fields = new Dictionary();
+
+	fields->Set("current_check_attempt", checkable->GetCheckAttempt());
+	fields->Set("max_check_attempts", checkable->GetMaxCheckAttempts());
+	fields->Set("host", host->GetName());
+
+	if (service) {
+		fields->Set("service", service->GetShortName());
+		fields->Set("state", service->GetState());
+		fields->Set("last_state", service->GetLastState());
+		fields->Set("last_hard_state", service->GetLastHardState());
+	} else {
+		fields->Set("state", host->GetState());
+		fields->Set("last_state", host->GetLastState());
+		fields->Set("last_hard_state", host->GetLastHardState());
+	}
+
+	CheckCommand::Ptr commandObj = checkable->GetCheckCommand();
+
+	if (commandObj)
+		fields->Set("check_command", commandObj->GetName());
+
+	double ts = Utility::GetTime();
+
+	if (cr) {
+		AddCheckResult(fields, checkable, cr);
+		ts = cr->GetExecutionEnd();
+	}
+
+	Enqueue("statechange", fields, ts);
+}
+
+void ElasticWriter::NotificationSentToAllUsersHandler(const Notification::Ptr& notification,
+    const Checkable::Ptr& checkable, const std::set<User::Ptr>& users, NotificationType type,
+    const CheckResult::Ptr& cr, const String& author, const String& text)
+{
+	m_WorkQueue.Enqueue(boost::bind(&ElasticWriter::NotificationSentToAllUsersHandlerInternal, this,
+	    notification, checkable, users, type, cr, author, text));
+}
+
+void ElasticWriter::NotificationSentToAllUsersHandlerInternal(const Notification::Ptr& notification,
+    const Checkable::Ptr& checkable, const std::set<User::Ptr>& users, NotificationType type,
+    const CheckResult::Ptr& cr, const String& author, const String& text)
 {
 	AssertOnWorkQueue();
 
@@ -265,48 +281,82 @@ void ElasticWriter::NotificationToUserHandlerInternal(const Notification::Ptr& n
 	Service::Ptr service;
 	tie(host, service) = GetHostService(checkable);
 
-	String notificationTypeString = Notification::NotificationTypeToString(notificationType);
-
-	String authorComment = "";
-
-	if (notificationType == NotificationCustom || notificationType == NotificationAcknowledgement) {
-		authorComment = author + ";" + commentText;
-	}
+	String notificationTypeString = Notification::NotificationTypeToString(type);
 
 	Dictionary::Ptr fields = new Dictionary();
-	String type;
 
 	if (service) {
-		type = "servicenotification";
-		fields->Set("_service_name", service->GetShortName());
+		fields->Set("service", service->GetShortName());
+		fields->Set("state", service->GetState());
+		fields->Set("last_state", service->GetLastState());
+		fields->Set("last_hard_state", service->GetLastHardState());
 	} else {
-		type = "hostnotification";
+		fields->Set("state", host->GetState());
+		fields->Set("last_state", host->GetLastState());
+		fields->Set("last_hard_state", host->GetLastHardState());
 	}
 
-	fields->Set("_state", service ? Service::StateToString(service->GetState()) : Host::StateToString(host->GetState()));
+	fields->Set("host", host->GetName());
 
-	fields->Set("_hostname", host->GetName());
-	fields->Set("_command", commandName);
-	fields->Set("_notification_type", notificationTypeString);
-	fields->Set("_comment", authorComment);
+	Array::Ptr userNames = new Array();
+
+	for (const User::Ptr& user : users) {
+		userNames->Add(user->GetName());
+	}
+
+	fields->Set("users", userNames);
+	fields->Set("notification_type", notificationTypeString);
+	fields->Set("author", author);
+	fields->Set("text", text);
 
 	CheckCommand::Ptr commandObj = checkable->GetCheckCommand();
 
 	if (commandObj)
-		fields->Set("_check_command", commandObj->GetName());
+		fields->Set("check_command", commandObj->GetName());
 
-	ElasticWriter::AddToQueue(type, fields);
+	double ts = Utility::GetTime();
+
+	if (cr) {
+		AddCheckResult(fields, checkable, cr);
+		ts = cr->GetExecutionEnd();
+	}
+
+	Enqueue("notification", fields, ts);
 }
 
-void ElasticWriter::AddToQueue(String type, const Dictionary::Ptr& fields)
+void ElasticWriter::Enqueue(String type, const Dictionary::Ptr& fields, double ts)
 {
 	// Atomically buffer the data point
 	boost::mutex::scoped_lock lock(m_DataBufferMutex);
 
 	// Every payload needs a line describing the index above
 	// We do it this way to avoid problems with a near full queue
-	String dat = "{ \"index\" : { \"_type\" : \"" + type + "\" } }\n" + JsonEncode(fields);
-	m_DataBuffer.push_back(dat);
+
+	//TODO:
+	/* The date format must match the default dynamic date detection
+	 * pattern in indexes. This enables applications like Kibana to
+	 * detect a qualified timestamp index for time-series data.
+	 * More details here: https://www.elastic.co/guide/en/elasticsearch/reference/current/dynamic-field-mapping.html#date-detection
+	 */
+	//String formattedNow = Utility::FormatDateTime("%Y-%m-%d %H:%M:%S %Z", ts);
+
+	String eventType = m_EventPrefix + type;
+
+	//TODO
+	/* Store the timestamp as milli-seconds-since-epoch.
+	 * Details: https://www.elastic.co/guide/en/elasticsearch/reference/current/date.html
+	 */
+	fields->Set("@timestamp", static_cast<unsigned int>(ts * 1000));
+	fields->Set("timestamp", static_cast<unsigned int>(ts * 1000));
+	fields->Set("type", eventType);
+
+	String data;
+
+	data += "{ \"index\" : { \"_type\" : \"" + eventType + "\" } }\n";
+	//data = "{ \"mappings\": { \"_default_\": \"properties\": { \"timestamp\": { \"type\": \"date\" } } } }\n";
+	data += JsonEncode(fields);
+
+	m_DataBuffer.push_back(data);
 
 	// Flush if we've buffered too much to prevent excessive memory use
 	if (static_cast<int>(m_DataBuffer.size()) >= GetFlushThreshold()) {
@@ -337,31 +387,39 @@ void ElasticWriter::Flush(void)
 	String body = boost::algorithm::join(m_DataBuffer, "\n");
 	m_DataBuffer.clear();
 
+	SendRequest(body);
+}
+
+void ElasticWriter::SendRequest(const String& body)
+{
 	Url::Ptr url = new Url();
-	//TODO HTTPS
-	//TODO AUTH
 	url->SetScheme("http");
 	url->SetHost(GetHost());
 	url->SetPort(GetPort());
 
 	std::vector<String> path;
-	path.push_back(GetIndex()+ "-" + Utility::FormatDateTime("%Y.%m.%d", Utility::GetTime()));
+	path.push_back(GetIndex() + "-" + Utility::FormatDateTime("%Y.%m.%d", Utility::GetTime()));
 	path.push_back("_bulk");
 	url->SetPath(path);
 
 	Stream::Ptr stream = Connect();
 	HttpRequest req(stream);
 	req.AddHeader("Accept", "application/json");
-	req.AddHeader("content-type", "application/json");
+	req.AddHeader("Content-Type", "application/json");
 	req.RequestMethod = "POST";
 	req.RequestUrl = url;
+
+#ifdef I2_DEBUG /* I2_DEBUG */
+	Log(LogInformation, "ElasticWriter")
+	    << "Sending body: " << body;
+#endif /* I2_DEBUG */
 
 	try {
 		req.WriteBody(body.CStr(), body.GetLength());
 		req.Finish();
 	} catch (const std::exception& ex) {
 		Log(LogWarning, "ElasticWriter")
-			<< "Cannot write to TCP socket on host '" << GetHost() << "' port '" << GetPort() << "'.";
+			<< "Cannot write to HTTP API on host '" << GetHost() << "' port '" << GetPort() << "'.";
 		throw ex;
 	}
 
@@ -372,27 +430,58 @@ void ElasticWriter::Flush(void)
 		resp.Parse(context, true);
 	} catch (const std::exception& ex) {
 		Log(LogWarning, "ElasticWriter")
-			<< "Cannot read from TCP socket from host '" << GetHost() << "' port '" << GetPort() << "'.";
+			<< "Cannot read from HTTP API on host '" << GetHost() << "' port '" << GetPort() << "'.";
 		throw ex;
 	}
 
-	size_t responseSize = resp.GetBodySize();
-	boost::scoped_array<char> buffer(new char[responseSize + 1]);
-	resp.ReadBody(buffer.get(), responseSize);
-	buffer.get()[responseSize] = '\0';
+	if (resp.StatusCode > 299) {
+		Log(LogWarning, "ElasticWriter")
+		    << "Unexpected response code " << resp.StatusCode;
 
+		// Finish parsing the headers and body
+		while (!resp.Complete)
+			resp.Parse(context, true);
+
+		String contentType = resp.Headers->Get("content-type");
+		if (contentType != "application/json") {
+			Log(LogWarning, "ElasticWriter")
+			    << "Unexpected Content-Type: " << contentType;
+			return;
+		}
+
+		size_t responseSize = resp.GetBodySize();
+		boost::scoped_array<char> buffer(new char[responseSize + 1]);
+		resp.ReadBody(buffer.get(), responseSize);
+		buffer.get()[responseSize] = '\0';
+
+		Dictionary::Ptr jsonResponse;
+		try {
+			jsonResponse = JsonDecode(buffer.get());
+		} catch (...) {
+			Log(LogWarning, "ElasticWriter")
+			    << "Unable to parse JSON response:\n" << buffer.get();
+			return;
+		}
+
+		String error = jsonResponse->Get("error");
+
+		Log(LogCritical, "ElasticWriter")
+		    << "Elasticsearch error message:\n" << error;
+	}
 }
 
 Stream::Ptr ElasticWriter::Connect(void)
 {
 	TcpSocket::Ptr socket = new TcpSocket();
+
 	Log(LogNotice, "ElasticWriter")
-	    << "Connecting to Elastic on host '" << GetHost() << "' port '" << GetPort() << "'.";
+	    << "Connecting to Elasticsearch on host '" << GetHost() << "' port '" << GetPort() << "'.";
+
 	try {
 		socket->Connect(GetHost(), GetPort());
 	} catch (const std::exception& ex) {
 		Log(LogWarning, "ElasticWriter")
-		    << "Can't connect to Elastic on host '" << GetHost() << "' port '" << GetPort() << "'.";
+		    << "Can't connect to Elasticsearch on host '" << GetHost() << "' port '" << GetPort() << "'.";
 		throw ex;
 	}
 	return new NetworkStream(socket);
