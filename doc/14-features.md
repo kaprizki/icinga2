@@ -264,6 +264,19 @@ expects the InfluxDB daemon to listen at `127.0.0.1` on port `8086`.
 
 More configuration details can be found [here](09-object-types.md#objecttype-influxdbwriter).
 
+### Elastic Writer <a id="elastic-writer"></a>
+
+This will automatically write check results, Notfifications and state changes to an elasticsearch index
+(default: `icinga2-*`). It uses the Elasticsearch HTTP API.
+
+You can enable the feature using
+
+    # icinga2 feature enable elastic
+
+By default it will write to an expected Elasticsearch instance at `127.0.0.1`, port `9200`.
+
+More configuration details can be found [here](09-object-types.md#objecttype-elasticwriter).
+
 ### Graylog Integration <a id="graylog-integration"></a>
 
 #### GELF Writer <a id="gelfwriter"></a>

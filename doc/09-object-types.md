@@ -969,6 +969,42 @@ is associated with the service:
       ...
     }
 
+## ElasticWriter <a id="objecttype-elasticwriter"></a>
+
+Writes check result metrics and performance data to en Elasticsearch instance.
+
+Example:
+
+    library "perfdata"
+
+    object ElasticWriter "elastic" {
+      host = "127.0.0.1"
+      port = 9200
+      index = "icinga2"
+
+      flush_threshold = 1024
+      flush_interval = 10
+
+    }
+
+Icinga2 will write rotate the index daily, as is recommended by Elastic. Meaning your index name will be transformed to
+`$index-$d.$M.$y`. Currently there is no TLS or authentication support as they are not available in the free version of
+Elasticsearch.
+
+Configuration Attributes:
+
+  Name                   |Description
+  -----------------------|---------------------------------------------------------------------------------------------------------
+  host                   | **Required.** Elasticsearch host address. Defaults to `127.0.0.1`.
+  port                   | **Required.** Elasticsearch HTTP port. Defaults to `9200`.
+  database               | **Required.** Elasticsearch index name. Defaults to `icinga2`.
+  flush_interval         | **Optional.** How long to buffer data points before transfering to Elasticsearch. Defaults to `10`.
+  flush_threshold        | **Optional.** How many data points to buffer before forcing a transfer to Elasticsearch.  Defaults to `1024`.
+
+Note: If `flush_threshold` is set too low, this will always force the feature to flush all data
+to Elasticsearch. Experiment with the setting, if you are processing more than 1024 metrics per second
+or similar.
+
 ## LiveStatusListener <a id="objecttype-livestatuslistener"></a>
 
 Livestatus API interface available as TCP or UNIX socket. Historical table queries
