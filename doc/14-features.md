@@ -264,19 +264,39 @@ expects the InfluxDB daemon to listen at `127.0.0.1` on port `8086`.
 
 More configuration details can be found [here](09-object-types.md#objecttype-influxdbwriter).
 
-### Elastic Writer <a id="elastic-writer"></a>
+### Elastic Stack Integration <a id="elastic-stack-integration"></a>
 
-This will automatically write check results, Notfifications and state changes to an elasticsearch index
-(default: `icinga2-*`). It uses the Elasticsearch HTTP API.
+[Icingabeat](https://github.com/icinga/icingabeat) is an Elastic Beat that fetches data
+from the Icinga 2 API and sends it either directly to [Elasticsearch](https://www.elastic.co/products/elasticsearch)
+or [Logstash](https://www.elastic.co/products/logstash).
 
-You can enable the feature using
+More integrations:
+
+* [Logstash output](https://github.com/Icinga/logstash-output-icinga) for the Icinga 2 API.
+* [Logstash Grok Pattern](https://github.com/Icinga/logstash-grok-pattern) for Icinga 2 logs.
+
+#### Elastic Writer <a id="elastic-writer"></a>
+
+This feature forwards check result, state change and notification events
+to an [Elasticsearch](https://www.elastic.co/products/elasticsearch) instance using its HTTP API.
+
+The check results include parsed performance data metrics.
+
+> **Note**
+>
+> Elasticsearch 5.x+ is required.
+
+The `index` defaults to `icinga2` and can be configured.
+
+Enable the feature and restart Icinga 2.
 
     # icinga2 feature enable elastic
 
-By default it will write to an expected Elasticsearch instance at `127.0.0.1`, port `9200`. Three types are used:
-`checkresult`, `statechange`, `servicenotification` and `servicenotification`.
+The feature expects a running Elasticsearch instance
+available on `localhost` on port `9200`.
 
 More configuration details can be found [here](09-object-types.md#objecttype-elasticwriter).
+
 
 ### Graylog Integration <a id="graylog-integration"></a>
 
@@ -302,14 +322,6 @@ Currently these events are processed:
 * State changes
 * Notifications
 
-### Elastic Stack Integration <a id="elastic-stack-integration"></a>
-
-[Icingabeat](https://github.com/icinga/icingabeat) is an Elastic Beat that fetches data
-from the Icinga 2 API and sends it either directly to Elasticsearch or Logstash.
-
-More integrations in development:
-* [Logstash output](https://github.com/Icinga/logstash-output-icinga) for the Icinga 2 API.
-* [Logstash Grok Pattern](https://github.com/Icinga/logstash-grok-pattern) for Icinga 2 logs.
 
 ### OpenTSDB Writer <a id="opentsdb-writer"></a>
 

@@ -971,7 +971,7 @@ is associated with the service:
 
 ## ElasticWriter <a id="objecttype-elasticwriter"></a>
 
-Writes check result metrics and performance data to en Elasticsearch instance.
+Writes check result metrics and performance data to an Elasticsearch instance.
 
 Example:
 
@@ -984,20 +984,18 @@ Example:
 
       flush_threshold = 1024
       flush_interval = 10
-
     }
 
-Icinga2 will write rotate the index daily, as is recommended by Elastic. Meaning your index name will be transformed to
-`$index-$d.$M.$y`. Currently there is no TLS or authentication support as they are not available in the free version of
-Elasticsearch.
+Icinga 2 rotates the index on a daily basis which is recommended by Elastic.
+This means your index name will change to `$index-$d.$M.$y`.
 
 Configuration Attributes:
 
   Name                   |Description
   -----------------------|---------------------------------------------------------------------------------------------------------
   host                   | **Required.** Elasticsearch host address. Defaults to `127.0.0.1`.
-  port                   | **Required.** Elasticsearch HTTP port. Defaults to `9200`.
-  database               | **Required.** Elasticsearch index name. Defaults to `icinga2`.
+  port                   | **Required.** Elasticsearch port. Defaults to `9200`.
+  index                  | **Required.** Elasticsearch index name. Defaults to `icinga2`.
   flush_interval         | **Optional.** How long to buffer data points before transfering to Elasticsearch. Defaults to `10`.
   flush_threshold        | **Optional.** How many data points to buffer before forcing a transfer to Elasticsearch.  Defaults to `1024`.
 
